@@ -902,6 +902,13 @@ func ShouldUseRoutes(knobs *controlknobs.Knobs) bool {
 	}
 	switch runtime.GOOS {
 	case "android", "ios":
+		// Allow the TS_DEBUG_DNS_FORWARD_USE_ROUTES override to win on mobile
+		// too. Without it there is no way to tell a broken userspace dialer
+		// apart from a broken route: both surface as the same upstream
+		// "context deadline exceeded".
+		if b, ok := optDNSForwardUseRoutes().Get(); ok {
+			return b
+		}
 		// On mobile platforms with lower memory limits (e.g., 50MB on iOS),
 		// this behavior is still gated by the "user-dial-routes" nodeAttr.
 		return knobs != nil && knobs.UserDialUseRoutes.Load()

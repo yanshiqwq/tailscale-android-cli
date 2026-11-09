@@ -28,6 +28,7 @@ import (
 	"tailscale.com/envknob"
 	"tailscale.com/health"
 	"tailscale.com/net/netmon"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/tsconst"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/opt"
@@ -456,6 +457,15 @@ func (r *linuxRouter) Set(cfg *router.Config) error {
 		errs = append(errs, err)
 	}
 	r.addrs = newAddrs
+
+	// Android: keep the tailnet range reachable from the main table for as
+	// long as this node holds an address. This cannot hang off addRoute:
+	// cfg.Routes carries one /32 per peer and never the whole range, so
+	// addRoute is never called with 100.64.0.0/10 and the rule at priority
+	// 5200 would point at an empty table.
+	if runtime.GOOS == "android" {
+		r.setAndroidMainRoute(tsaddr.CGNATRange(), len(cfg.LocalAddrs) > 0)
+	}
 
 	// Ensure that the SNAT rule is added or removed as needed.
 	switch {
@@ -1042,6 +1052,47 @@ func (r *linuxRouter) delRoute(cidr netip.Prefix) error {
 	return err
 }
 
+// setAndroidMainRoute adds or removes the tailnet range in the main table.
+//
+// Android's netd installs its own policy routing rules and rewrites the chain
+// on every network change, which drops the rules tailscaled added. Unmarked
+// replies for inbound tailnet connections are then looked up in
+// "legacy_system"/main, find no route for 100.64.0.0/10, and leave through the
+// physical interface instead of the tunnel, so inbound SSH/HTTP over the
+// tailnet stops working. Keeping a main-table route in place makes the return
+// path independent of tailscaled's own rules surviving netd. This replaces the
+// external tailscale-route-fix module.
+//
+// It is a no-op off Android.
+func (r *linuxRouter) setAndroidMainRoute(cidr netip.Prefix, add bool) {
+	if runtime.GOOS != "android" {
+		return
+	}
+	linkIndex, err := r.linkIndex()
+	if err != nil {
+		return
+	}
+	route := &netlink.Route{
+		LinkIndex: linkIndex,
+		Dst:       netipx.PrefixIPNet(cidr.Masked()),
+		Table:     mainRouteTable.Num,
+		Scope:     netlink.SCOPE_LINK,
+	}
+	if !add {
+		// Keep the route in place. Deleting it here raced with the next
+		// reconcile and, when the delete won, left the device with no
+		// main-table path to 100.64.0.0/10 at all: inbound replies,
+		// outbound dials and the DNS forwarder's upstream queries all
+		// failed until the route was restored by hand. The route is
+		// harmless while the tun has no carrier (the kernel drops packets
+		// for a link that is down) and is replaced on the next configure.
+		return
+	}
+	if err := netlink.RouteReplace(route); err != nil {
+		r.logf("android: failed to add main-table route for %v: %v", cidr, err)
+	}
+}
+
 // delThrowRoute removes the throw route for the cidr. Fails if the route
 // doesn't exist, or if removing the route fails.
 func (r *linuxRouter) delThrowRoute(cidr netip.Prefix) error {
@@ -1418,6 +1469,17 @@ func detectAndroidDefaultTable() int {
 // exit node rule that uses the current default network's routing table.
 func getAndroidIPRules() []netlink.Rule {
 	rules := []netlink.Rule{
+		// Priority 5200 (ahead of netd's own rules): resolve the tailnet range
+		// from the main table, where setAndroidMainRoute keeps a route. netd
+		// rewrites the policy chain on every network change and drops the rules
+		// below, after which reply traffic for inbound tailnet connections had
+		// no route and left via the physical interface. This rule survives
+		// that because it does not depend on table 52 being reachable.
+		{
+			Priority: 0, // 5200 + 0 = 5200
+			Dst:      netipx.PrefixIPNet(tsaddr.CGNATRange()),
+			Table:    mainRouteTable.Num,
+		},
 		// Priority 7300 (12500): Tailscale CGNAT range (100.64.0.0/10) always uses table 52, before VPN rules
 		// This ensures peer-to-peer traffic doesn't go through other VPNs
 		{

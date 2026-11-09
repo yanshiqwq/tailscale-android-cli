@@ -901,8 +901,13 @@ func (ns *Impl) handleLocalPackets(p *packet.Parsed, t *tstun.Wrapper, gro *gro.
 	// Hijack DNS queries to external servers if CorpDNS is enabled
 	if p.Dst.Port() == 53 && (p.IPProto == ipproto.UDP || p.IPProto == ipproto.TCP) {
 		dst := p.Dst.Addr()
-		// Skip hijacking for queries to Tailscale DNS itself
-		if dst != serviceIP && dst != serviceIPv6 {
+		// Skip hijacking for queries to Tailscale DNS itself, and for any
+		// other address inside the tailnet: the resolver forwards split-DNS
+		// lookups by dialling the tailnet nameserver directly, and those
+		// packets leave through the tunnel. Hijacking them here bounced each
+		// query back into the resolver that issued it until the request
+		// queue overflowed and every lookup on the device failed.
+		if dst != serviceIP && dst != serviceIPv6 && !tsaddr.IsTailscaleIP(dst) {
 			// Only hijack if CorpDNS is enabled (--accept-dns=true)
 			if ns.lb != nil && ns.lb.Prefs().CorpDNS() {
 				// Copy and process DNS query in goroutine
