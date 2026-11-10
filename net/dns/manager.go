@@ -226,12 +226,17 @@ func (m *Manager) setLocked(cfg Config) error {
 	if err := m.setDNSLocked(ocfg); err != nil {
 		return err
 	}
-	if androidStartTPROXY != nil {
-		androidStartTPROXY(m)
-	}
 
 	m.health.SetHealthy(osConfigurationSetWarnable)
 	m.config = &cfg
+
+	// Only when the OS resolver is actually ours to redirect. With accept-dns
+	// off, ocfg carries no nameservers, androidManager.SetDNS has just torn the
+	// hijack down, and starting it here would intercept every lookup with a
+	// manager that has nothing to answer from.
+	if androidStartTPROXY != nil && len(ocfg.Nameservers) > 0 {
+		androidStartTPROXY(m)
+	}
 
 	return nil
 }

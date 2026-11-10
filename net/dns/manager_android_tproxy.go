@@ -35,8 +35,8 @@ import (
 // queries use the equivalent output-path setup:
 //
 //	ip6tables -t mangle -A OUTPUT -p udp --dport 53 -j TS_TPROXY6
-//	TS_TPROXY6: RETURN for tailnet + upstreams, then MARK --set-xmark 0x5453
-//	ip -6 rule add fwmark 0x5453 lookup 5453 pref 1300
+//	TS_TPROXY6: RETURN for tailnet + upstreams, then MARK --set-xmark 0x20000000
+//	ip -6 rule add fwmark 0x20000000/0x20000000 lookup 5453 pref 1300
 //	ip -6 route add local default dev lo table 5453
 //
 // The packet is then delivered to the IPV6_TRANSPARENT socket below instead of
@@ -45,7 +45,7 @@ import (
 // The socket feeds the same dns.Manager.Query handler as the IPv4 DNAT path, so
 // MagicDNS, single-label expansion and split DNS behave identically on both.
 const (
-	androidTPROXYMark  = 0x5453
+	androidTPROXYMark  = 0x20000000
 	androidTPROXYTable = 5453
 	androidTPROXYPref  = 1300
 	androidTPROXYChain = "TS_TPROXY6"
@@ -68,9 +68,21 @@ func startAndroidTPROXY(m *Manager) {
 	defer tproxyMu.Unlock()
 
 	if tproxyConn != nil {
-		if err := installAndroidTPROXY6Rules(); err != nil {
-			m.logf("dns: v6 TPROXY rule refresh failed (non-fatal): %v", err)
-		}
+		// Re-asserting the rule and the local route is ~10 exec calls (~120ms
+		// on a phone), and the caller holds the DNS manager lock that every
+		// lookup also needs. Refresh off the lock: the state is idempotent and
+		// a short delay is harmless, whereas stalling lookups during a network
+		// change is not.
+		go func() {
+			tproxyMu.Lock()
+			defer tproxyMu.Unlock()
+			if tproxyConn == nil {
+				return // stopped in the meantime
+			}
+			if err := installAndroidTPROXY6Rules(); err != nil {
+				m.logf("dns: v6 TPROXY rule refresh failed (non-fatal): %v", err)
+			}
+		}()
 		return
 	}
 
@@ -238,7 +250,7 @@ func udpAddrPort(a *net.UDPAddr) (netip.AddrPort, bool) {
 // installAndroidTPROXY6Rules is idempotent and cheap enough to run on every
 // recompile.
 func installAndroidTPROXY6Rules() error {
-	mark := fmt.Sprintf("%#x", androidTPROXYMark)
+	mark := fmt.Sprintf("%#x/%#x", androidTPROXYMark, androidTPROXYMark)
 	table := strconv.Itoa(androidTPROXYTable)
 	pref := strconv.Itoa(androidTPROXYPref)
 
@@ -273,7 +285,7 @@ func installAndroidTPROXY6Rules() error {
 			return err
 		}
 	}
-	if err := ipt.Append("mangle", chain, []string{"-j", "MARK", "--set-xmark", mark + "/0xffffffff"}...); err != nil {
+	if err := ipt.Append("mangle", chain, []string{"-j", "MARK", "--set-xmark", fmt.Sprintf("%#x/%#x", androidTPROXYMark, androidTPROXYMark)}...); err != nil {
 		return err
 	}
 
@@ -293,7 +305,7 @@ func removeAndroidTPROXY6Rules() {
 		_ = ipt.ClearChain("mangle", androidTPROXYChain)
 		_ = ipt.DeleteChain("mangle", androidTPROXYChain)
 	}
-	mark := fmt.Sprintf("%#x", androidTPROXYMark)
+	mark := fmt.Sprintf("%#x/%#x", androidTPROXYMark, androidTPROXYMark)
 	table := strconv.Itoa(androidTPROXYTable)
 	pref := strconv.Itoa(androidTPROXYPref)
 	_ = runIP("-6", "rule", "del", "fwmark", mark, "lookup", table, "pref", pref)
