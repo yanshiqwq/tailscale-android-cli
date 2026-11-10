@@ -48,6 +48,11 @@ var (
 	// upstream queries out of the DNS hijack, and OSConfig cannot carry them:
 	// it only ever names the service IP.
 	androidSetUpstreams func(cfg Config)
+	// androidStartTPROXY installs the IPv6 half of the hijack. Android kernels
+	// usually lack an ip6tables nat table, so IPv6 cannot be redirected with
+	// DNAT the way IPv4 is; TPROXY in the mangle table is used instead. Nil on
+	// every other platform.
+	androidStartTPROXY func(m *Manager)
 )
 
 var (
@@ -220,6 +225,9 @@ func (m *Manager) setLocked(cfg Config) error {
 	}
 	if err := m.setDNSLocked(ocfg); err != nil {
 		return err
+	}
+	if androidStartTPROXY != nil {
+		androidStartTPROXY(m)
 	}
 
 	m.health.SetHealthy(osConfigurationSetWarnable)

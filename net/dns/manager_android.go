@@ -35,6 +35,7 @@ func init() {
 	}
 	androidRewriteSingleLabel = rewriteSingleLabelResponse
 	androidSetUpstreams = publishAndroidUpstreams
+	androidStartTPROXY = startAndroidTPROXY
 }
 
 // androidUpstreams holds the resolver addresses the forwarder may dial. The
@@ -51,13 +52,14 @@ func androidUpstreamSnapshot() []netip.Addr {
 
 // publishAndroidUpstreams records the resolvers the daemon may dial.
 //
-// Only IPv4 matters here: the IPv6 half of the hijack never installs on kernels
-// without an ip6tables nat table, so there is nothing to exclude on that side.
+// Both address families are recorded: the IPv4 DNAT chain needs the IPv4 ones,
+// and the IPv6 TPROXY chain needs the IPv6 ones to keep the daemon's own
+// upstream queries out of the redirect.
 func publishAndroidUpstreams(cfg Config) {
 	var addrs []netip.Addr
 	add := func(rs []*dnstype.Resolver) {
 		for _, a := range toIPsOnly(rs) {
-			if a.Is4() && !slices.Contains(addrs, a) {
+			if !slices.Contains(addrs, a) {
 				addrs = append(addrs, a)
 			}
 		}
@@ -139,6 +141,9 @@ func (m *androidManager) Close() error {
 // while a rule left behind by an earlier one would keep intercepting DNS with
 // nothing tracking it.
 func (m *androidManager) disableLocked() {
+	// The IPv6 TPROXY listener and its routing state are not visible to the
+	// netfilter rules below, so they are torn down explicitly.
+	stopAndroidTPROXY(m.logf)
 	if err := removeDNSRules(false); err != nil {
 		m.logf("dns: failed to remove rules: %v", err)
 	}
@@ -218,6 +223,9 @@ func dnsChainRules(ipv6 bool) [][]string {
 	var rules [][]string
 	if !ipv6 {
 		for _, a := range androidUpstreamSnapshot() {
+			if !a.Is4() {
+				continue
+			}
 			rules = append(rules, []string{"-d", a.String(), "-j", "RETURN"})
 		}
 	}
