@@ -164,6 +164,9 @@ func (i *iptablesRunner) AddHooks() error {
 		if err := divert(ipt, "filter", "FORWARD"); err != nil {
 			return err
 		}
+		if err := divert(ipt, "mangle", "PREROUTING"); err != nil {
+			return err
+		}
 	}
 
 	for _, ipt := range i.getNATTables() {
@@ -196,6 +199,9 @@ func (i *iptablesRunner) AddChains() error {
 			return err
 		}
 		if err := create(ipt, "filter", "ts-forward"); err != nil {
+			return err
+		}
+		if err := create(ipt, "mangle", "ts-prerouting"); err != nil {
 			return err
 		}
 	}
@@ -258,6 +264,30 @@ func (i *iptablesRunner) addBase4(tunname string) error {
 	args = []string{"-o", tunname, "-j", "ACCEPT"}
 	if err := i.ipt4.Append("filter", "ts-forward", args...); err != nil {
 		return fmt.Errorf("adding %v in v4/filter/ts-forward: %w", args, err)
+	}
+
+	// For Android: mark in PREROUTING so routing decision can use the mark
+	args = []string{"-i", tunname, "-j", "MARK", "--set-mark", subnetRouteMark + "/" + fwmarkMask}
+	if err := i.ipt4.Append("mangle", "ts-prerouting", args...); err != nil {
+		return fmt.Errorf("adding %v in v4/mangle/ts-prerouting: %w", args, err)
+	}
+
+	// MASQUERADE exit node traffic going to physical interfaces
+	args = []string{"-i", tunname, "!", "-o", tunname, "-j", "MASQUERADE"}
+	if err := i.ipt4.Append("nat", "ts-postrouting", args...); err != nil {
+		return fmt.Errorf("adding %v in v4/nat/ts-postrouting: %w", args, err)
+	}
+
+	// Allow hotspot clients to access Tailscale network
+	args = []string{"-o", tunname, "-j", "MASQUERADE"}
+	if err := i.ipt4.Append("nat", "ts-postrouting", args...); err != nil {
+		return fmt.Errorf("adding %v in v4/nat/ts-postrouting: %w", args, err)
+	}
+
+	// Clamp MSS for forwarded TCP to avoid TLS failures with double-VPN/low MTU tunnels
+	args = []string{"-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1200"}
+	if err := i.ipt4.Append("mangle", "ts-prerouting", args...); err != nil {
+		return fmt.Errorf("adding %v in v4/mangle/ts-prerouting: %w", args, err)
 	}
 
 	return nil
@@ -373,6 +403,34 @@ func (i *iptablesRunner) addBase6(tunname string) error {
 		return fmt.Errorf("adding %v in v6/filter/ts-forward: %w", args, err)
 	}
 
+	// Mark packets from subnetRouter, need enable IP6 NAT zcat /proc/config.gz | grep IP6_NF_NAT 2>/dev/null
+	args = []string{"-i", tunname, "-j", "MARK", "--set-mark", subnetRouteMark + "/" + fwmarkMask}
+	if err := i.ipt6.Append("mangle", "ts-prerouting", args...); err != nil {
+		return fmt.Errorf("adding %v in v6/mangle/ts-prerouting: %w", args, err)
+	}
+
+	// MASQUERADE exit node traffic going to physical interfaces
+	if i.v6NATAvailable {
+		args = []string{"-i", tunname, "!", "-o", tunname, "-j", "MASQUERADE"}
+		if err := i.ipt6.Append("nat", "ts-postrouting", args...); err != nil {
+			return fmt.Errorf("adding %v in v6/nat/ts-postrouting: %w", args, err)
+		}
+	}
+
+	// Allow hotspot clients to access Tailscale network
+	if i.v6NATAvailable {
+		args = []string{"-o", tunname, "-j", "MASQUERADE"}
+		if err := i.ipt6.Append("nat", "ts-postrouting", args...); err != nil {
+			return fmt.Errorf("adding %v in v6/nat/ts-postrouting: %w", args, err)
+		}
+	}
+
+	// Clamp MSS for forwarded TCP to avoid TLS failures with double-VPN/low MTU tunnels
+	args = []string{"-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1200"}
+	if err := i.ipt6.Append("mangle", "ts-prerouting", args...); err != nil {
+		return fmt.Errorf("adding %v in v6/mangle/ts-prerouting: %w", args, err)
+	}
+
 	return nil
 }
 
@@ -383,6 +441,9 @@ func (i *iptablesRunner) DelChains() error {
 			return err
 		}
 		if err := delChain(ipt, "filter", "ts-forward"); err != nil {
+			return err
+		}
+		if err := delChain(ipt, "mangle", "ts-prerouting"); err != nil {
 			return err
 		}
 	}
@@ -418,6 +479,9 @@ func (i *iptablesRunner) DelBase() error {
 		if err := del(ipt, "filter", "ts-forward"); err != nil {
 			return err
 		}
+		if err := del(ipt, "mangle", "ts-prerouting"); err != nil {
+			return err
+		}
 	}
 	for _, ipt := range i.getNATTables() {
 		if err := del(ipt, "nat", "ts-postrouting"); err != nil {
@@ -436,6 +500,9 @@ func (i *iptablesRunner) DelHooks(logf logger.Logf) error {
 			return err
 		}
 		if err := delTSHook(ipt, "filter", "FORWARD", logf); err != nil {
+			return err
+		}
+		if err := delTSHook(ipt, "mangle", "PREROUTING", logf); err != nil {
 			return err
 		}
 	}

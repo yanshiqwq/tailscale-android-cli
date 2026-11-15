@@ -1,7 +1,7 @@
 // Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd
+//go:build (linux && !android) || android || (darwin && !ios) || freebsd || openbsd
 
 // monitorClient is tailscaled's side of the ssh-monitor RPC channel.
 // It spawns the per-connection monitor process, re-exec'ing the

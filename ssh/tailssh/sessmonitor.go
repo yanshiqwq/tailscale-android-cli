@@ -1,7 +1,7 @@
 // Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd
+//go:build (linux && !android) || android || (darwin && !ios) || freebsd || openbsd
 
 // Session processes are launched by the connection's privileged monitor.
 // tailscaled keeps the parent I/O descriptors and passes the child's stdio

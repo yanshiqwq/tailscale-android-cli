@@ -1,7 +1,7 @@
 // Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd
+//go:build (linux && !android) || android || (darwin && !ios) || freebsd || openbsd
 
 // The per-connection privileged ssh-monitor process. tailscaled spawns
 // it, as "tailscaled be-child ssh-monitor", once a connection is

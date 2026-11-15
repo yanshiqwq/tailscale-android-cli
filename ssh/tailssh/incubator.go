@@ -7,7 +7,7 @@
 // and groups to the specified `--uid`, `--gid` and `--groups`, and
 // then launches the requested `--cmd`.
 
-//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd
+//go:build (linux && !android) || android || (darwin && !ios) || freebsd || openbsd
 
 package tailssh
 
@@ -47,6 +47,7 @@ import (
 
 const (
 	linux   = "linux"
+	android = "android"
 	darwin  = "darwin"
 	freebsd = "freebsd"
 	openbsd = "openbsd"
@@ -968,6 +969,19 @@ func (ss *sshSession) launchProcess() error {
 
 	cmd := ss.cmd
 	cmd.Env = ss.incubatorEnv()
+	if runtime.GOOS == "android" {
+		// Android has no /etc/passwd and no usable exec environment: run
+		// from HOME and inherit the daemon's own environment (minus TS_*),
+		// so the shell finds its PATH and the user's profile.
+		if home, exists := os.LookupEnv("HOME"); exists {
+			cmd.Dir = home
+		}
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "TS_") {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
+	}
 
 	// Pass default TERM and locale variables through the environment pipe.
 	// Policy-forwarded values take precedence over these defaults.
@@ -1407,6 +1421,8 @@ func (ia *incubatorArgs) loginArgs(loginCmdPath string) []string {
 			return []string{loginCmdPath, "-f", ia.localUser, "-p"}
 		}
 		return []string{loginCmdPath, "-f", ia.localUser, "-h", ia.remoteIP, "-p"}
+	case android:
+		return []string{loginCmdPath}
 	case freebsd, openbsd:
 		return []string{loginCmdPath, "-fp", "-h", ia.remoteIP, ia.localUser}
 	}
@@ -1434,6 +1450,16 @@ func setGroups(groupIDs []int) error {
 		// some permissions thing isn't working, due to some arbitrary group ordering, but it at least allows
 		// this to work for more things than it previously did.
 		groupIDs = groupIDs[:16]
+	}
+
+	if runtime.GOOS == "android" {
+		if os.Geteuid() == 0 {
+			err := syscall.Setgroups(groupIDs)
+			if err != nil {
+				fmt.Println("Setgroups failed:", err)
+			}
+		}
+		return nil
 	}
 
 	err := syscall.Setgroups(groupIDs)

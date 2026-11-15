@@ -37,6 +37,26 @@ import (
 	"tailscale.com/version"
 )
 
+// androidExpandSingleLabel, androidRewriteSingleLabel and androidSetUpstreams
+// are installed by manager_android.go. Android is the only platform where
+// tailscaled cannot install search domains, so single-label names have to be
+// expanded here; on every other platform all three are nil and the resolver
+// behaves as before.
+var (
+	androidExpandSingleLabel  func(m *Manager, query []byte) (singleLabelExpansion, bool)
+	androidRewriteSingleLabel func(resp []byte, e singleLabelExpansion) ([]byte, bool)
+	// androidSetUpstreams hands the resolver addresses the forwarder may dial
+	// to the Android OS configurator. It needs them to keep the daemon's own
+	// upstream queries out of the DNS hijack, and OSConfig cannot carry them:
+	// it only ever names the service IP.
+	androidSetUpstreams func(cfg Config)
+	// androidStartTPROXY installs the IPv6 half of the hijack. Android kernels
+	// usually lack an ip6tables nat table, so IPv6 cannot be redirected with
+	// DNAT the way IPv4 is; TPROXY in the mangle table is used instead. Nil on
+	// every other platform.
+	androidStartTPROXY func(m *Manager)
+)
+
 var (
 	errFullQueue = errors.New("request queue full")
 	// ErrNoDNSConfig is returned by RecompileDNSConfig when the Manager
@@ -224,6 +244,9 @@ func (m *Manager) setLocked(cfg Config) error {
 		m.config = nil
 		return err
 	}
+	if androidSetUpstreams != nil {
+		androidSetUpstreams(cfg)
+	}
 	if err := m.setDNSLocked(ocfg); err != nil {
 		return err
 	}
@@ -231,6 +254,14 @@ func (m *Manager) setLocked(cfg Config) error {
 	m.health.SetHealthy(osConfigurationSetWarnable)
 	m.health.SetHealthy(EmptyBaseConfigWarnable)
 	m.config = &cfg
+
+	// Only when the OS resolver is actually ours to redirect. With accept-dns
+	// off, ocfg carries no nameservers, androidManager.SetDNS has just torn the
+	// hijack down, and starting it here would intercept every lookup with a
+	// manager that has nothing to answer from.
+	if androidStartTPROXY != nil && len(ocfg.Nameservers) > 0 {
+		androidStartTPROXY(m)
+	}
 
 	return nil
 }
@@ -663,6 +694,24 @@ func (m *Manager) Query(ctx context.Context, bs []byte, family string, from neti
 		return nil, errFullQueue
 	}
 	defer atomic.AddInt32(&m.activeQueriesAtomic, -1)
+
+	// Android cannot install search domains into netd, so turn a bare
+	// hostname into a MagicDNS name before the resolver sees it.
+	if androidExpandSingleLabel != nil {
+		if e, ok := androidExpandSingleLabel(m, bs); ok {
+			if out, err := m.resolver.Query(ctx, e.query, family, from); err == nil {
+				if rw, ok := androidRewriteSingleLabel(out, e); ok {
+					m.mu.Lock()
+					if m.queryResponseMapper != nil {
+						rw = m.queryResponseMapper(rw)
+					}
+					m.mu.Unlock()
+					return rw, nil
+				}
+			}
+		}
+	}
+
 	outbs, err := m.resolver.Query(ctx, bs, family, from)
 	if err != nil {
 		return outbs, err
