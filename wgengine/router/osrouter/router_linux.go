@@ -1370,32 +1370,38 @@ func (r *linuxRouter) setAndroidV6Default() {
 }
 
 // androidActiveV6Default returns the gateway and interface of an active
-// ccmni* IPv6 default route, or empty strings when none is usable.
+// IPv6 default route, or empty strings when none is usable.
+//
+// Wi-Fi wins over cellular when both carry one: Wi-Fi is normally the
+// Android default network, and the one netd routes other apps over.
 func androidActiveV6Default() (dev, gw string) {
 	out, err := exec.Command("ip", "-6", "route", "show", "table", "all").Output()
 	if err != nil {
 		return "", ""
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		// "default via fe80::1 dev ccmni2 proto ra metric 1024 expires ..."
-		f := strings.Fields(line)
-		if len(f) < 3 || f[0] != "default" {
-			continue
-		}
-		var via, d string
-		for i := 0; i+1 < len(f); i++ {
-			switch f[i] {
-			case "via":
-				via = f[i+1]
-			case "dev":
-				d = f[i+1]
+	lines := strings.Split(string(out), "\n")
+	for _, prefix := range []string{"wlan", "ccmni"} {
+		for _, line := range lines {
+			// "default via fe80::1 dev wlan0 proto ra metric 1024 ..."
+			f := strings.Fields(line)
+			if len(f) < 3 || f[0] != "default" {
+				continue
 			}
-		}
-		if via == "" || !strings.HasPrefix(d, "ccmni") {
-			continue
-		}
-		if androidIfaceActive(d) {
-			return d, via
+			var via, d string
+			for i := 0; i+1 < len(f); i++ {
+				switch f[i] {
+				case "via":
+					via = f[i+1]
+				case "dev":
+					d = f[i+1]
+				}
+			}
+			if via == "" || !strings.HasPrefix(d, prefix) {
+				continue
+			}
+			if androidIfaceActive(d) {
+				return d, via
+			}
 		}
 	}
 	return "", ""
