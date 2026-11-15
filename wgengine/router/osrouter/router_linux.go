@@ -524,6 +524,8 @@ func (r *linuxRouter) Set(cfg *router.Config) error {
 	// 5200 would point at an empty table.
 	if runtime.GOOS == "android" {
 		r.setAndroidMainRoute(tsaddr.CGNATRange(), len(cfg.LocalAddrs) > 0)
+		r.setAndroidV6Default()
+		r.setAndroidSubnetRules()
 	}
 
 	// Ensure that the SNAT rule is added or removed as needed.
@@ -1336,6 +1338,127 @@ func (r *linuxRouter) setAndroidMainRoute(cidr netip.Prefix, add bool) {
 	}
 	if err := netlink.RouteReplace(route); err != nil {
 		r.logf("android: failed to add main-table route for %v: %v", cidr, err)
+	}
+}
+
+// setAndroidV6Default gives tailscaled a usable IPv6 default route.
+//
+// Android keeps its IPv6 default only in the per-network table ("ccmni3"
+// etc.); the main table has none, and the policy chain ends with
+// "32000: from all unreachable". A root/TUN tailscaled has no netd per-app
+// fwmark, so its IPv6 sockets look up the main table and get rejected: the
+// device reports "IPv6: no, but OS has support" and every peer falls back to
+// IPv4 or DERP.
+//
+// Install a copy of the netd route in the main table, plus a uidrange 0-0
+// rule so only root (tailscaled) uses it; ordinary apps keep their
+// per-network routing.
+//
+// It is a no-op off Android.
+func (r *linuxRouter) setAndroidV6Default() {
+	if runtime.GOOS != "android" {
+		return
+	}
+	dev, gw := androidActiveV6Default()
+	if dev == "" || gw == "" {
+		return
+	}
+	if out, err := exec.Command("ip", "-6", "route", "replace", "default", "via", gw, "dev", dev, "table", "main").CombinedOutput(); err != nil {
+		r.logf("android: failed to add v6 default via %s dev %s: %v: %s", gw, dev, err, bytes.TrimSpace(out))
+	}
+	exec.Command("ip", "-6", "rule", "add", "pref", "900", "uidrange", "0-0", "lookup", "main").Run()
+}
+
+// androidActiveV6Default returns the gateway and interface of an active
+// ccmni* IPv6 default route, or empty strings when none is usable.
+func androidActiveV6Default() (dev, gw string) {
+	out, err := exec.Command("ip", "-6", "route", "show", "table", "all").Output()
+	if err != nil {
+		return "", ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		// "default via fe80::1 dev ccmni2 proto ra metric 1024 expires ..."
+		f := strings.Fields(line)
+		if len(f) < 3 || f[0] != "default" {
+			continue
+		}
+		var via, d string
+		for i := 0; i+1 < len(f); i++ {
+			switch f[i] {
+			case "via":
+				via = f[i+1]
+			case "dev":
+				d = f[i+1]
+			}
+		}
+		if via == "" || !strings.HasPrefix(d, "ccmni") {
+			continue
+		}
+		if androidIfaceActive(d) {
+			return d, via
+		}
+	}
+	return "", ""
+}
+
+// androidIfaceActive reports whether dev is up with carrier and has an IPv4
+// address (a stale ccmni can linger NO-CARRIER with an old 10/8 address).
+func androidIfaceActive(dev string) bool {
+	link, err := exec.Command("ip", "link", "show", "dev", dev).Output()
+	if err != nil || !strings.Contains(string(link), "LOWER_UP") {
+		return false
+	}
+	addr, err := exec.Command("ip", "-4", "addr", "show", "dev", dev).Output()
+	return err == nil && strings.Contains(string(addr), "inet ")
+}
+
+// setAndroidSubnetRules installs policy rules for --accept-routes subnets.
+//
+// With --accept-routes the subnets arrive in table 52, but Android's policy
+// chain never looks there: tailscaled only installs a rule for 100.64.0.0/10
+// (priority 12500), and netd owns everything else. Traffic to an accepted
+// subnet leaves via the physical interface and dies.
+//
+// Rebuild the rules the old tailscale-route-fix module used, but from inside
+// tailscaled so router.Set keeps them in sync with the netmap:
+//
+//	5270        from all lookup 52          (tailnet subnets)
+//	5260..5279  to <subnet> lookup main     (this node sits on that subnet)
+//
+// It is a no-op off Android.
+func (r *linuxRouter) setAndroidSubnetRules() {
+	if runtime.GOOS != "android" {
+		return
+	}
+	const base = 5260
+	const maxSubnets = 20
+	for p := base; p < base+maxSubnets; p++ {
+		exec.Command("ip", "rule", "del", "pref", strconv.Itoa(p)).Run()
+	}
+	exec.Command("ip", "rule", "add", "pref", "5270", "from", "all", "lookup", "52").Run()
+	out, err := exec.Command("ip", "route", "show", "table", "52").Output()
+	if err != nil {
+		return
+	}
+	n := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || !strings.Contains(f[0], "/") {
+			continue
+		}
+		cidr := f[0]
+		if strings.HasPrefix(cidr, "100.64.0.0/10") || strings.HasPrefix(cidr, "fd7a:") {
+			continue
+		}
+		if n >= maxSubnets {
+			break
+		}
+		if exec.Command("ip", "rule", "add", "pref", strconv.Itoa(base+n), "to", cidr, "lookup", "main").Run() == nil {
+			n++
+		}
+	}
+	if n > 0 {
+		r.logf("android: installed %d subnet main-first rule(s)", n)
 	}
 }
 
