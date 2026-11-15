@@ -92,6 +92,7 @@ jobs:
               dist/tailscaled.arm64
 
         - name: Create Release
+          if: startsWith(github.ref, 'refs/tags/')
           uses: softprops/action-gh-release@v3
           with:
             token: "${{ secrets.GITHUB_TOKEN }}"
